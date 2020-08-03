@@ -288,7 +288,7 @@ def collate(batch):
     return images, bboxes
 
 
-def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=20, img_scale=0.5):
+def train(model, device, config, epochs=5, batch_size=1, save_cp_step=10, log_step=20, img_scale=0.5):
     train_dataset = Yolo_dataset(config.train_label, config, train=True)
     val_dataset = Yolo_dataset(config.val_label, config, train=False)
 
@@ -317,7 +317,7 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
         Learning rate:   {config.learning_rate}
         Training size:   {n_train}
         Validation size: {n_val}
-        Checkpoints:     {save_cp}
+        Checkpoints step:{save_cp_step}
         Device:          {device.type}
         Images size:     {config.width}
         Optimizer:       {config.TRAIN_OPTIMIZER}
@@ -364,12 +364,10 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
     for epoch in range(epochs):
         # model.train()
         epoch_loss = 0
-        epoch_step = 0
 
         with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img', ncols=50) as pbar:
             for i, batch in enumerate(train_loader):
                 global_step += 1
-                epoch_step += 1
                 images = batch[0]
                 bboxes = batch[1]
 
@@ -412,10 +410,10 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
 
                 pbar.update(images.shape[0])
 
-            if cfg.use_darknet_cfg:
-                eval_model = Darknet(cfg.cfgfile, inference=True)
+            if config.use_darknet_cfg:
+                eval_model = Darknet(config.cfgfile, inference=True)
             else:
-                eval_model = Yolov4(cfg.pretrained, n_classes=cfg.classes, inference=True)
+                eval_model = Yolov4(config.pretrained, n_classes=config.classes, inference=True)
             # eval_model = Yolov4(yolov4conv137weight=None, n_classes=config.classes, inference=True)
             if torch.cuda.device_count() > 1:
                 eval_model.load_state_dict(model.module.state_dict())
@@ -438,8 +436,9 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
             writer.add_scalar('train/AR_small', stats[9], global_step)
             writer.add_scalar('train/AR_medium', stats[10], global_step)
             writer.add_scalar('train/AR_large', stats[11], global_step)
+            
 
-            if save_cp:
+            if (epoch % save_cp_step == 0) or (epochs - epoch < 3):
                 try:
                     # os.mkdir(config.checkpoints)
                     os.makedirs(config.checkpoints, exist_ok=True)
@@ -521,45 +520,7 @@ def evaluate(model, data_loader, cfg, device, logger=None, **kwargs):
     coco_evaluator.summarize()
 
     return coco_evaluator
-
-
-def get_args(**kwargs):
-    cfg = kwargs
-    parser = argparse.ArgumentParser(description='Train the Model on images and target masks',
-                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    # parser.add_argument('-b', '--batch-size', metavar='B', type=int, nargs='?', default=2,
-    #                     help='Batch size', dest='batchsize')
-    parser.add_argument('-l', '--learning-rate', metavar='LR', type=float, nargs='?', default=0.001,
-                        help='Learning rate', dest='learning_rate')
-    parser.add_argument('-f', '--load', dest='load', type=str, default=None,
-                        help='Load model from a .pth file')
-    parser.add_argument('-g', '--gpu', metavar='G', type=str, default='-1',
-                        help='GPU', dest='gpu')
-    parser.add_argument('-dir', '--data-dir', type=str, default=None,
-                        help='dataset dir', dest='dataset_dir')
-    parser.add_argument('-pretrained', type=str, default=None, help='pretrained yolov4.conv.137')
-    parser.add_argument('-classes', type=int, default=80, help='dataset classes')
-    parser.add_argument('-train_label_path', dest='train_label', type=str, default='train.txt', help="train label path")
-    parser.add_argument(
-        '-optimizer', type=str, default='adam',
-        help='training optimizer',
-        dest='TRAIN_OPTIMIZER')
-    parser.add_argument(
-        '-iou-type', type=str, default='iou',
-        help='iou type (iou, giou, diou, ciou)',
-        dest='iou_type')
-    parser.add_argument(
-        '-keep-checkpoint-max', type=int, default=10,
-        help='maximum number of checkpoints to keep. If set 0, all checkpoints will be kept',
-        dest='keep_checkpoint_max')
-    args = vars(parser.parse_args())
-
-    # for k in args.keys():
-    #     cfg[k] = args.get(k)
-    cfg.update(args)
-
-    return edict(cfg)
-
+    
 
 def init_logger(log_file=None, log_dir=None, log_level=logging.INFO, mode='w', stdout=True):
     """
@@ -601,9 +562,9 @@ def _get_date_str():
     return now.strftime('%Y-%m-%d_%H-%M')
 
 
-if __name__ == "__main__":
-    logging = init_logger(log_dir='log')
-    cfg = get_args(**Cfg)
+def train_yolov4(cfg):
+    logging = init_logger(log_dir=cfg.TRAIN_TENSORBOARD_DIR)
+
     os.environ["CUDA_VISIBLE_DEVICES"] = cfg.gpu
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
@@ -612,6 +573,14 @@ if __name__ == "__main__":
         model = Darknet(cfg.cfgfile)
     else:
         model = Yolov4(cfg.pretrained, n_classes=cfg.classes)
+
+        #TODO, load checkpoints
+        '''
+        WORK_FOLDER = '/mnt/bos/modules/perception/emergency_detection'
+        weightfile = os.path.join(WORK_FOLDER, 'checkpoints/Yolov4_epoch291.pth')
+        pretrained_dict = torch.load(weightfile, map_location=torch.device('cuda'))
+        model.load_state_dict(pretrained_dict)
+        '''
 
     if torch.cuda.device_count() > 1:
         model = torch.nn.DataParallel(model)
@@ -629,3 +598,60 @@ if __name__ == "__main__":
             sys.exit(0)
         except SystemExit:
             os._exit(0)
+
+
+def get_args_local(**kwargs):
+    cfg = kwargs
+
+    '''
+    args={'learning_rate': 0.001, 'load': None, 'gpu': '-1', 'dataset_dir': '/fuel/fueling/perception/emergency_detection/data/emergency_vehicle/images', 
+    'pretrained': '/fuel/fueling/perception/emergency_detection/pretrained_model/yolov4.conv.137.pth', 'classes': 2, 
+    'train_label': '/fuel/fueling/perception/emergency_detection/data/emergency_vehicle/train.txt', 
+    'val_label': '/fuel/fueling/perception/emergency_detection/data/emergency_vehicle/val.txt', 
+    'TRAIN_OPTIMIZER': 'adam', 'iou_type': 'iou', 'keep_checkpoint_max': 10}
+    '''
+
+    parser = argparse.ArgumentParser(description='Train the Model on images and target masks',
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    # parser.add_argument('-b', '--batch-size', metavar='B', type=int, nargs='?', default=2,
+    #                     help='Batch size', dest='batchsize')
+    parser.add_argument('-l', '--learning-rate', metavar='LR', type=float, nargs='?', default=0.001,
+                        help='Learning rate', dest='learning_rate')
+    parser.add_argument('-f', '--load', dest='load', type=str, default=None,
+                        help='Load model from a .pth file')
+    parser.add_argument('-g', '--gpu', metavar='G', type=str, default='-1',
+                        help='GPU', dest='gpu')
+    parser.add_argument('-dir', '--data-dir', type=str, default=None,
+                        help='dataset dir', dest='dataset_dir')
+    parser.add_argument('-pretrained', type=str, default=None, help='pretrained yolov4.conv.137')
+    parser.add_argument('-classes', type=int, default=80, help='dataset classes')
+    parser.add_argument('-train_label_path', dest='train_label', type=str, default='train.txt', help="train label path")
+    parser.add_argument(
+        '-optimizer', type=str, default='adam',
+        help='training optimizer',
+        dest='TRAIN_OPTIMIZER')
+    parser.add_argument(
+        '-iou-type', type=str, default='iou',
+        help='iou type (iou, giou, diou, ciou)',
+        dest='iou_type')
+    parser.add_argument(
+        '-keep-checkpoint-max', type=int, default=10,
+        help='maximum number of checkpoints to keep. If set 0, all checkpoints will be kept',
+        dest='keep_checkpoint_max')
+    args = vars(parser.parse_args())
+    
+    cfg.update(args)
+
+    return edict(cfg)
+
+
+if __name__ == "__main__":
+    #cfg = get_args(**Cfg)
+    cfg = get_args_local(**Cfg)
+
+    logging.info(f'Using device {device}')
+    logging.info(F'cuda available? {torch.cuda.is_available()}')
+    logging.info(F'cuda version: {torch.version.cuda}')
+    logging.info(F'gpu device count: {torch.cuda.device_count()}')
+
+    train_yolov4(cfg)
